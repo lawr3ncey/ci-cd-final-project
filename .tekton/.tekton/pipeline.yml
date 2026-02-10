@@ -1,0 +1,90 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: ci-cd-final-pipeline
+spec:
+  params:
+    - name: repo-url
+      type: string
+      default: https://github.com/lawr3ncey/ci-cd-final-project.git
+    - name: revision
+      type: string
+      default: main
+    - name: image
+      type: string
+      default: image-registry.openshift-image-registry.svc:5000/$(context.pipelineRun.namespace)/ci-cd-final-project:latest
+    - name: app-name
+      type: string
+      default: ci-cd-final-project
+
+  workspaces:
+    - name: output
+
+  tasks:
+    - name: cleanup
+      taskRef:
+        name: cleanup
+      workspaces:
+        - name: source
+          workspace: output
+
+    - name: git-clone
+      runAfter: [cleanup]
+      taskRef:
+        kind: ClusterTask
+        name: git-clone
+      params:
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.revision)
+      workspaces:
+        - name: output
+          workspace: output
+
+    - name: flake8
+      runAfter: [git-clone]
+      taskRef:
+        name: lint
+      workspaces:
+        - name: source
+          workspace: output
+
+    - name: nose
+      runAfter: [flake8]
+      taskRef:
+        name: nose
+      params:
+        - name: args
+          value: -v --with-spec --spec-color --with-coverage --cover-package=app
+      workspaces:
+        - name: source
+          workspace: output
+
+    # ✅ ClusterTask buildah (no privileged)
+    - name: buildah
+      runAfter: [nose]
+      taskRef:
+        kind: ClusterTask
+        name: buildah
+      params:
+        - name: IMAGE
+          value: $(params.image)
+        - name: DOCKERFILE
+          value: ./Dockerfile
+        - name: CONTEXT
+          value: .
+      workspaces:
+        - name: source
+          workspace: output
+
+    - name: deploy
+      runAfter: [buildah]
+      taskRef:
+        kind: ClusterTask
+        name: openshift-client
+      params:
+        - name: SCRIPT
+          value: |
+            oc create deployment $(params.app-name) --image=$(params.image) --dry-run=client -o yaml | oc apply -f -
+            oc expose deployment/$(params.app-name) --port=8000 --dry-run=client -o yaml | oc apply -f -
